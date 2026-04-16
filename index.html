@@ -1,0 +1,557 @@
+This is an HTML document that creates a web app to analyze dead stock, fast-moving, and slow-moving SKUs by importing three Excel files, using web workers for efficient processing.
+
+```html
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes">
+    <title>Inventory Analytics: Deadstock, Fast/Slow Moving SKUs</title>
+    <!-- Bootstrap 5 + Icons + Font Awesome (optional for better UI) -->
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0-alpha1/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0-beta3/css/all.min.css">
+    <!-- SheetJS for Excel/CSV parsing -->
+    <script src="https://cdn.sheetjs.com/xlsx-0.20.2/package/dist/xlsx.full.min.js"></script>
+    <style>
+        body {
+            background: #f4f7fc;
+            font-family: 'Segoe UI', Roboto, system-ui;
+        }
+        .card-header {
+            background: linear-gradient(135deg, #1e2a3e, #0f1a24);
+            color: white;
+            font-weight: 600;
+        }
+        .upload-card {
+            transition: all 0.2s;
+            border: none;
+            box-shadow: 0 5px 12px rgba(0,0,0,0.05);
+        }
+        .file-badge {
+            background-color: #e9ecef;
+            padding: 5px 12px;
+            border-radius: 20px;
+            font-size: 0.8rem;
+        }
+        .table-responsive {
+            max-height: 380px;
+            overflow-y: auto;
+        }
+        .table-sm th {
+            background: #eef2f5;
+            position: sticky;
+            top: 0;
+            z-index: 10;
+        }
+        .badge-dead {
+            background-color: #b91c1c;
+        }
+        .btn-analytics {
+            background: #0d6efd;
+            color: white;
+            font-weight: 500;
+            padding: 10px 24px;
+            border-radius: 40px;
+        }
+        .spinner-overlay {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0,0,0,0.5);
+            z-index: 2000;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            visibility: hidden;
+        }
+        .stats-card {
+            border-left: 5px solid #0d6efd;
+        }
+        footer {
+            font-size: 0.8rem;
+            color: #6c757d;
+        }
+    </style>
+</head>
+<body>
+
+<div class="spinner-overlay" id="globalSpinner">
+    <div class="bg-white p-4 rounded-4 shadow-lg text-center">
+        <div class="spinner-border text-primary" style="width: 3rem; height: 3rem;" role="status"></div>
+        <p class="mt-3 fw-bold">Processing large data with Web Worker...</p>
+        <small>Please wait, analyzing inventory files</small>
+    </div>
+</div>
+
+<div class="container my-4">
+    <div class="text-center mb-4">
+        <h1 class="display-6 fw-bold"><i class="fas fa-chart-line me-2"></i>Inventory Intelligence Suite</h1>
+        <p class="lead">Deadstock, Fast-moving & Slow-moving SKU analysis (Excel/CSV)</p>
+        <hr class="w-50 mx-auto">
+    </div>
+
+    <!-- File Upload Cards Row -->
+    <div class="row g-4 mb-5">
+        <div class="col-md-4">
+            <div class="card upload-card h-100">
+                <div class="card-header bg-dark text-white"><i class="fas fa-chart-simple me-2"></i>1. Sales File</div>
+                <div class="card-body">
+                    <input type="file" class="form-control" id="salesFileInput" accept=".xlsx, .xls, .csv, .xlsb">
+                    <div class="mt-2" id="salesStatus"><span class="badge bg-secondary">No file loaded</span></div>
+                    <small class="text-muted">Requires columns: <strong>category, date, qty</strong> (item category code = SKU)</small>
+                </div>
+            </div>
+        </div>
+        <div class="col-md-4">
+            <div class="card upload-card h-100">
+                <div class="card-header bg-dark text-white"><i class="fas fa-boxes me-2"></i>2. BC Master File</div>
+                <div class="card-body">
+                    <input type="file" class="form-control" id="bcFileInput" accept=".xlsx, .xls, .csv">
+                    <div class="mt-2" id="bcStatus"><span class="badge bg-secondary">No file loaded</span></div>
+                    <small class="text-muted">Columns: <strong>No., Description, Inventory</strong></small>
+                </div>
+            </div>
+        </div>
+        <div class="col-md-4">
+            <div class="card upload-card h-100">
+                <div class="card-header bg-dark text-white"><i class="fas fa-truck me-2"></i>3. Purchase Lines File</div>
+                <div class="card-body">
+                    <input type="file" class="form-control" id="purchaseFileInput" accept=".xlsx, .xls, .csv">
+                    <div class="mt-2" id="purchaseStatus"><span class="badge bg-secondary">No file loaded</span></div>
+                    <small class="text-muted">Columns: <strong>No., Posting Date</strong> (latest date per SKU)</small>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Action Buttons -->
+    <div class="d-flex flex-wrap justify-content-between align-items-center mb-4">
+        <button class="btn btn-analytics shadow-sm" id="analyzeBtn" disabled>
+            <i class="fas fa-microchip me-2"></i>Run Full Analysis (Deadstock + Velocity)
+        </button>
+        <button class="btn btn-outline-success" id="downloadDeadstockBtn" disabled>
+            <i class="fas fa-download me-1"></i>Export Deadstock CSV
+        </button>
+        <small class="text-muted"><i class="fas fa-database"></i> Web Worker enabled for huge datasets</small>
+    </div>
+
+    <!-- Results Tabs -->
+    <ul class="nav nav-tabs mt-3" id="reportTab" role="tablist">
+        <li class="nav-item" role="presentation">
+            <button class="nav-link active" id="dead-tab" data-bs-toggle="tab" data-bs-target="#deadPanel" type="button" role="tab"><i class="fas fa-skull-crosswalk me-1"></i> Deadstock SKUs</button>
+        </li>
+        <li class="nav-item" role="presentation">
+            <button class="nav-link" id="fast-tab" data-bs-toggle="tab" data-bs-target="#fastPanel" type="button" role="tab"><i class="fas fa-rocket me-1"></i> Fast Moving</button>
+        </li>
+        <li class="nav-item" role="presentation">
+            <button class="nav-link" id="slow-tab" data-bs-toggle="tab" data-bs-target="#slowPanel" type="button" role="tab"><i class="fas fa-turtle me-1"></i> Slow Moving</button>
+        </li>
+    </ul>
+    <div class="tab-content p-3 bg-white rounded-bottom shadow-sm mb-5" style="border:1px solid #dee2e6; border-top: none;">
+        <!-- Deadstock Panel -->
+        <div class="tab-pane fade show active" id="deadPanel" role="tabpanel">
+            <div class="d-flex justify-content-between align-items-center mb-2">
+                <h5><i class="fas fa-exclamation-triangle text-danger"></i> Items in BC but never sold (deadstock)</h5>
+                <span id="deadCountBadge" class="badge bg-danger">0 items</span>
+            </div>
+            <div class="table-responsive">
+                <table class="table table-sm table-bordered table-hover" id="deadstockTable">
+                    <thead class="table-light">
+                        <tr><th>SKU (No.)</th><th>Description</th><th>Inventory (Stock)</th><th>Last Purchase Date</th><th>Days Not Sold (Dead)</th></tr>
+                    </thead>
+                    <tbody><tr><td colspan="5" class="text-center text-muted">No analysis yet</td></tr></tbody>
+                </table>
+            </div>
+        </div>
+        <!-- Fast Moving Panel -->
+        <div class="tab-pane fade" id="fastPanel" role="tabpanel">
+            <h5><i class="fas fa-bolt text-success"></i> High Velocity SKUs (short period)</h5>
+            <div class="table-responsive">
+                <table class="table table-sm table-bordered" id="fastTable">
+                    <thead><tr><th>SKU</th><th>Description</th><th>Total Qty Sold</th><th>Date Range (first-last)</th><th>Avg Daily Velocity</th></tr></thead>
+                    <tbody><tr><td colspan="5" class="text-muted">Run analysis</td></tr></tbody>
+                </table>
+            </div>
+        </div>
+        <!-- Slow Moving Panel -->
+        <div class="tab-pane fade" id="slowPanel" role="tabpanel">
+            <h5><i class="fas fa-hourglass-half text-warning"></i> Slow Moving SKUs (low velocity)</h5>
+            <div class="table-responsive">
+                <table class="table table-sm table-bordered" id="slowTable">
+                    <thead><tr><th>SKU</th><th>Description</th><th>Total Qty Sold</th><th>Date Range</th><th>Avg Daily Velocity</th></tr></thead>
+                    <tbody><tr><td colspan="5" class="text-muted">Run analysis</td></tr></tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+    <footer class="text-center mt-2">✅ Logic: Deadstock = SKU present in BC file but absent in sales (based on category = BC No.). <br> Fast/Slow based on sales velocity percentiles (80th/20th). Last posting date from purchase lines (max date). Web worker for background processing.</footer>
+</div>
+
+<script>
+    // ---------- Global State ----------
+    let salesRawData = null;      // array of objects from sales file
+    let bcRawData = null;         // array from BC file
+    let purchaseRawData = null;   // array from purchase lines
+
+    let currentDeadstockResult = [];   // store for export
+
+    // DOM elements
+    const salesInput = document.getElementById('salesFileInput');
+    const bcInput = document.getElementById('bcFileInput');
+    const purchaseInput = document.getElementById('purchaseFileInput');
+    const analyzeBtn = document.getElementById('analyzeBtn');
+    const downloadDeadBtn = document.getElementById('downloadDeadstockBtn');
+    const salesStatus = document.getElementById('salesStatus');
+    const bcStatus = document.getElementById('bcStatus');
+    const purchaseStatus = document.getElementById('purchaseStatus');
+    const spinner = document.getElementById('globalSpinner');
+
+    // Helper: parse excel/csv using SheetJS -> JSON
+    function parseExcelFile(file) {
+        return new Promise((resolve, reject) => {
+            const reader = new FileReader();
+            reader.onload = function(e) {
+                const data = new Uint8Array(e.target.result);
+                const workbook = XLSX.read(data, { type: 'array', cellDates: false, defval: "" });
+                const firstSheet = workbook.Sheets[workbook.SheetNames[0]];
+                const json = XLSX.utils.sheet_to_json(firstSheet, { defval: "" });
+                resolve(json);
+            };
+            reader.onerror = (err) => reject(err);
+            reader.readAsArrayBuffer(file);
+        });
+    }
+
+    // Normalize column names to lower case & trim for safe matching
+    function normalizeColumns(row) {
+        const newRow = {};
+        for (let key in row) {
+            const normalizedKey = key.trim();
+            newRow[normalizedKey] = row[key];
+        }
+        return newRow;
+    }
+
+    // Validate and store file data
+    async function handleFileUpload(file, type) {
+        if (!file) return null;
+        try {
+            const jsonData = await parseExcelFile(file);
+            if (!jsonData || jsonData.length === 0) throw new Error("Empty file");
+            const normalized = jsonData.map(row => normalizeColumns(row));
+            // basic column validation based on type
+            if (type === 'sales') {
+                const sample = normalized[0];
+                if (!sample.hasOwnProperty('category') && !sample.hasOwnProperty('Category')) {
+                    if (!sample['category'] && !sample['Category']) console.warn("Missing 'category' column");
+                }
+                if (!sample.hasOwnProperty('date') && !sample.hasOwnProperty('Date')) console.warn("Missing date column");
+                if (!sample.hasOwnProperty('qty') && !sample.hasOwnProperty('Qty') && !sample['quantity']) console.warn("Missing qty column");
+                salesStatus.innerHTML = `<span class="badge bg-success"><i class="fas fa-check-circle"></i> Loaded: ${normalized.length} rows</span>`;
+            } else if (type === 'bc') {
+                bcStatus.innerHTML = `<span class="badge bg-success"><i class="fas fa-check-circle"></i> Loaded: ${normalized.length} rows</span>`;
+            } else if (type === 'purchase') {
+                purchaseStatus.innerHTML = `<span class="badge bg-success"><i class="fas fa-check-circle"></i> Loaded: ${normalized.length} rows</span>`;
+            }
+            return normalized;
+        } catch (err) {
+            console.error(err);
+            if (type === 'sales') salesStatus.innerHTML = `<span class="badge bg-danger">Error parsing</span>`;
+            if (type === 'bc') bcStatus.innerHTML = `<span class="badge bg-danger">Error parsing</span>`;
+            if (type === 'purchase') purchaseStatus.innerHTML = `<span class="badge bg-danger">Error parsing</span>`;
+            return null;
+        }
+    }
+
+    salesInput.addEventListener('change', async (e) => {
+        if (e.target.files.length) {
+            salesRawData = await handleFileUpload(e.target.files[0], 'sales');
+            toggleAnalyzeButton();
+        } else { salesRawData = null; salesStatus.innerHTML = `<span class="badge bg-secondary">No file</span>`; toggleAnalyzeButton(); }
+    });
+    bcInput.addEventListener('change', async (e) => {
+        if (e.target.files.length) {
+            bcRawData = await handleFileUpload(e.target.files[0], 'bc');
+            toggleAnalyzeButton();
+        } else { bcRawData = null; bcStatus.innerHTML = `<span class="badge bg-secondary">No file</span>`; toggleAnalyzeButton(); }
+    });
+    purchaseInput.addEventListener('change', async (e) => {
+        if (e.target.files.length) {
+            purchaseRawData = await handleFileUpload(e.target.files[0], 'purchase');
+            toggleAnalyzeButton();
+        } else { purchaseRawData = null; purchaseStatus.innerHTML = `<span class="badge bg-secondary">No file</span>`; toggleAnalyzeButton(); }
+    });
+
+    function toggleAnalyzeButton() {
+        if (salesRawData && bcRawData && purchaseRawData) {
+            analyzeBtn.disabled = false;
+        } else {
+            analyzeBtn.disabled = true;
+        }
+    }
+
+    // -------------------- WEB WORKER (Inline Blob) --------------------
+    function createWorkerBlob() {
+        const workerCode = `
+            self.addEventListener('message', function(e) {
+                const { sales, bc, purchase } = e.data;
+                try {
+                    // Helper: extract column case-insensitively
+                    function getField(obj, fieldNames) {
+                        for(let fn of fieldNames) {
+                            if(obj[fn] !== undefined) return obj[fn];
+                        }
+                        return undefined;
+                    }
+                    
+                    // 1. Process Purchase lines: group by No., get max Posting Date
+                    const purchaseLastDateMap = new Map(); // key: No -> Date object (max)
+                    for (let row of purchase) {
+                        let sku = getField(row, ['No.', 'No', 'Document No.']);
+                        if (!sku) continue;
+                        sku = String(sku).trim();
+                        let postingDateRaw = getField(row, ['Posting Date', 'PostingDate', 'Posting_Date']);
+                        if (!postingDateRaw) continue;
+                        let dateVal = new Date(postingDateRaw);
+                        if (isNaN(dateVal)) continue;
+                        if (!purchaseLastDateMap.has(sku) || purchaseLastDateMap.get(sku) < dateVal) {
+                            purchaseLastDateMap.set(sku, dateVal);
+                        }
+                    }
+                    
+                    // 2. Process Sales: group by category (SKU), compute total qty, min date, max date
+                    const salesMap = new Map(); // key: sku -> { totalQty, minDate, maxDate }
+                    for (let row of sales) {
+                        let sku = getField(row, ['category', 'Category', 'item_category_code', 'Item Category Code']);
+                        if (!sku) continue;
+                        sku = String(sku).trim();
+                        let qtyRaw = getField(row, ['qty', 'Qty', 'quantity', 'Quantity']);
+                        let qty = parseFloat(qtyRaw);
+                        if (isNaN(qty)) qty = 0;
+                        let dateRaw = getField(row, ['date', 'Date', 'posting_date']);
+                        let saleDate = dateRaw ? new Date(dateRaw) : null;
+                        if (!saleDate || isNaN(saleDate)) continue;
+                        
+                        if (!salesMap.has(sku)) {
+                            salesMap.set(sku, { totalQty: qty, minDate: saleDate, maxDate: saleDate });
+                        } else {
+                            let existing = salesMap.get(sku);
+                            existing.totalQty += qty;
+                            if (saleDate < existing.minDate) existing.minDate = saleDate;
+                            if (saleDate > existing.maxDate) existing.maxDate = saleDate;
+                        }
+                    }
+                    
+                    // 3. BC mapping: description & inventory
+                    const bcMap = new Map(); // No -> { description, inventory }
+                    for (let row of bc) {
+                        let sku = getField(row, ['No.', 'No', 'Item No']);
+                        if (!sku) continue;
+                        sku = String(sku).trim();
+                        let description = getField(row, ['Description', 'description']) || '';
+                        let inventoryRaw = getField(row, ['Inventory', 'inventory', 'Stock', 'stock']);
+                        let inventory = (inventoryRaw !== undefined && !isNaN(parseFloat(inventoryRaw))) ? parseFloat(inventoryRaw) : 0;
+                        bcMap.set(sku, { description: String(description), inventory: inventory });
+                    }
+                    
+                    // 4. Deadstock: BC SKUs not present in salesMap
+                    const deadstockItems = [];
+                    const today = new Date();
+                    for (let [sku, bcInfo] of bcMap.entries()) {
+                        if (!salesMap.has(sku)) {
+                            let lastPurchaseDate = purchaseLastDateMap.get(sku) || null;
+                            let daysNotSold = null;
+                            if (lastPurchaseDate) {
+                                const diffTime = today - lastPurchaseDate;
+                                daysNotSold = Math.max(0, Math.floor(diffTime / (1000 * 60 * 60 * 24)));
+                            } else {
+                                daysNotSold = null;
+                            }
+                            deadstockItems.push({
+                                No: sku,
+                                description: bcInfo.description,
+                                inventory: bcInfo.inventory,
+                                lastPostingDate: lastPurchaseDate ? lastPurchaseDate.toISOString().split('T')[0] : 'N/A',
+                                daysNotSold: daysNotSold !== null ? daysNotSold : 'N/A'
+                            });
+                        }
+                    }
+                    
+                    // 5. Compute velocity for items that HAVE sales
+                    const velocityEntries = [];
+                    for (let [sku, saleData] of salesMap.entries()) {
+                        const bcInfo = bcMap.get(sku);
+                        const description = bcInfo ? bcInfo.description : 'Unknown';
+                        const totalQty = saleData.totalQty;
+                        const start = saleData.minDate;
+                        const end = saleData.maxDate;
+                        let daysDiff = (end - start) / (1000*3600*24);
+                        if (daysDiff < 1) daysDiff = 1;
+                        const avgVelocity = totalQty / daysDiff;
+                        const dateRangeStr = start.toISOString().split('T')[0] + " → " + end.toISOString().split('T')[0];
+                        velocityEntries.push({
+                            sku: sku,
+                            description: description,
+                            totalQty: totalQty,
+                            dateRange: dateRangeStr,
+                            velocity: avgVelocity,
+                            daysSpan: daysDiff
+                        });
+                    }
+                    
+                    // classify fast/slow using percentiles (velocity > 80th percentile = fast; velocity < 20th percentile and >0 = slow)
+                    velocityEntries.sort((a,b) => a.velocity - b.velocity);
+                    const len = velocityEntries.length;
+                    let fastMoving = [];
+                    let slowMoving = [];
+                    if (len > 0) {
+                        const p80Index = Math.floor(len * 0.8);
+                        const p20Index = Math.floor(len * 0.2);
+                        const highThreshold = velocityEntries[p80Index]?.velocity || Infinity;
+                        const lowThreshold = velocityEntries[p20Index]?.velocity || 0;
+                        for (let item of velocityEntries) {
+                            if (item.velocity >= highThreshold && highThreshold > 0) fastMoving.push(item);
+                            else if (item.velocity <= lowThreshold && item.velocity > 0) slowMoving.push(item);
+                        }
+                        // ensure we have both lists not empty fallback top/bottom if percentiles create gaps
+                        if (fastMoving.length === 0 && velocityEntries.length) fastMoving = [velocityEntries[velocityEntries.length-1]];
+                        if (slowMoving.length === 0 && velocityEntries.length) slowMoving = [velocityEntries[0]];
+                    }
+                    
+                    // sort fast moving desc velocity, slow moving asc
+                    fastMoving.sort((a,b) => b.velocity - a.velocity);
+                    slowMoving.sort((a,b) => a.velocity - b.velocity);
+                    
+                    self.postMessage({ success: true, deadstock: deadstockItems, fastMoving, slowMoving });
+                } catch(err) {
+                    self.postMessage({ success: false, error: err.message });
+                }
+            });
+        `;
+        const blob = new Blob([workerCode], { type: 'application/javascript' });
+        return URL.createObjectURL(blob);
+    }
+
+    let workerInstance = null;
+
+    function runAnalysis() {
+        if (!salesRawData || !bcRawData || !purchaseRawData) {
+            alert("Please upload all three files (Sales, BC, Purchase Lines)");
+            return;
+        }
+        spinner.style.visibility = "visible";
+        analyzeBtn.disabled = true;
+        downloadDeadBtn.disabled = true;
+        
+        // cleanup previous worker
+        if (workerInstance) {
+            workerInstance.terminate();
+        }
+        const workerUrl = createWorkerBlob();
+        workerInstance = new Worker(workerUrl);
+        
+        workerInstance.onmessage = function(ev) {
+            spinner.style.visibility = "hidden";
+            analyzeBtn.disabled = false;
+            if (ev.data.success) {
+                const { deadstock, fastMoving, slowMoving } = ev.data;
+                currentDeadstockResult = deadstock;
+                renderDeadstockTable(deadstock);
+                renderFastSlowTables(fastMoving, slowMoving);
+                if (deadstock.length > 0) downloadDeadBtn.disabled = false;
+                else downloadDeadBtn.disabled = true;
+                document.getElementById('deadCountBadge').innerText = `${deadstock.length} dead items`;
+            } else {
+                console.error(ev.data.error);
+                alert("Analysis error: " + ev.data.error + " Check console for details");
+                document.getElementById('deadstockTable').innerHTML = '<tbody><tr><td colspan="5" class="text-danger">Analysis failed</td></tr></tbody>';
+            }
+            URL.revokeObjectURL(workerUrl);
+        };
+        
+        // prepare data: ensure column aliases are normalized already but we send raw array
+        // convert to plain serializable objects
+        workerInstance.postMessage({
+            sales: salesRawData,
+            bc: bcRawData,
+            purchase: purchaseRawData
+        });
+    }
+    
+    function renderDeadstockTable(deadstockArray) {
+        const tbody = document.querySelector('#deadstockTable tbody');
+        if (!deadstockArray.length) {
+            tbody.innerHTML = '<tr><td colspan="5" class="text-center">✅ No deadstock items found. All BC items have sales.</td></tr>';
+            return;
+        }
+        let html = '';
+        for (let item of deadstockArray) {
+            html += `<tr>
+                        <td>${escapeHtml(item.No)}</td>
+                        <td>${escapeHtml(item.description)}</td>
+                        <td>${item.inventory.toLocaleString()}</td>
+                        <td>${item.lastPostingDate}</td>
+                        <td>${item.daysNotSold === 'N/A' ? 'N/A' : item.daysNotSold + ' days'}</td>
+                     </tr>`;
+        }
+        tbody.innerHTML = html;
+    }
+    
+    function renderFastSlowTables(fastArr, slowArr) {
+        const fastBody = document.querySelector('#fastTable tbody');
+        const slowBody = document.querySelector('#slowTable tbody');
+        if (fastArr.length === 0) fastBody.innerHTML = '<tr><td colspan="5">No fast-moving data</td></tr>';
+        else {
+            let fastHtml = '';
+            for (let f of fastArr) {
+                fastHtml += `<tr><td>${escapeHtml(f.sku)}</td><td>${escapeHtml(f.description)}</td><td>${f.totalQty}</td><td>${f.dateRange}</td><td>${f.velocity.toFixed(2)} qty/day</td></tr>`;
+            }
+            fastBody.innerHTML = fastHtml;
+        }
+        if (slowArr.length === 0) slowBody.innerHTML = '<tr><td colspan="5">No slow-moving data</td></tr>';
+        else {
+            let slowHtml = '';
+            for (let s of slowArr) {
+                slowHtml += `<tr><td>${escapeHtml(s.sku)}</td><td>${escapeHtml(s.description)}</td><td>${s.totalQty}</td><td>${s.dateRange}</td><td>${s.velocity.toFixed(2)} qty/day</td></tr>`;
+            }
+            slowBody.innerHTML = slowHtml;
+        }
+    }
+    
+    function escapeHtml(str) { if(!str) return ''; return String(str).replace(/[&<>]/g, function(m){ if(m === '&') return '&amp;'; if(m === '<') return '&lt;'; if(m === '>') return '&gt;'; return m;}); }
+    
+    // Export deadstock CSV
+    function exportDeadstockCSV() {
+        if (!currentDeadstockResult.length) {
+            alert("No deadstock data to export");
+            return;
+        }
+        const headers = ['No', 'description', 'inventory', 'last posting date', 'days not sold'];
+        const rows = currentDeadstockResult.map(item => [
+            item.No, item.description, item.inventory, item.lastPostingDate, item.daysNotSold
+        ]);
+        const csvContent = [headers, ...rows].map(row => row.map(cell => `"${String(cell).replace(/"/g, '""')}"`).join(",")).join("\n");
+        const blob = new Blob(["\uFEFF" + csvContent], { type: "text/csv;charset=utf-8;" });
+        const link = document.createElement('a');
+        const url = URL.createObjectURL(blob);
+        link.href = url;
+        link.setAttribute("download", "deadstock_report.csv");
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+        URL.revokeObjectURL(url);
+    }
+    
+    analyzeBtn.addEventListener('click', runAnalysis);
+    downloadDeadBtn.addEventListener('click', exportDeadstockCSV);
+    
+    // Bootstrap JS for tabs
+    const bootstrapScript = document.createElement('script');
+    bootstrapScript.src = "https://cdn.jsdelivr.net/npm/bootstrap@5.3.0-alpha1/dist/js/bootstrap.bundle.min.js";
+    document.body.appendChild(bootstrapScript);
+</script>
+</body>
+</html>
+```
